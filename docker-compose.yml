@@ -1,0 +1,19 @@
+version: '3'
+services:
+  vm-provisioning:
+    container_name: vm-provisioning-app    # Explicit container name
+    build: .
+    ports:
+      - "${FLASK_PORT:-5051}:5051"
+    volumes:
+      - ./vm_provisioning.log:/app/vm_provisioning.log
+    environment:
+      - FLASK_APP=vm_provisioning/app.py
+      - PYTHONPATH=/app
+      - DEMO_MODE=false
+      - VCENTER_PORT=443
+      - FLASK_PORT=${FLASK_PORT:-5051}
+      - SECRET_KEY=${SECRET_KEY:-your-secret-key-here}
+      - SESSION_LIFETIME=${SESSION_LIFETIME:-1800}
+      - LOG_FILE=vm_provisioning.log
+    restart: unless-stopped
