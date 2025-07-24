@@ -9,6 +9,7 @@ from flask import (
     jsonify,
     Response,
     flash,
+    send_from_directory,
 )
 import threading
 import queue
@@ -21,7 +22,7 @@ from werkzeug.security import generate_password_hash, check_password_hash
 import re
 import time
 import random
-from .config import config
+from config import config
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", secrets.token_hex(32))
@@ -32,6 +33,9 @@ app.permanent_session_lifetime = timedelta(
 # Use demo mode from config
 DEMO_MODE = config["DEMO_MODE"]
 app.logger.info(f"Demo mode is {'enabled' if DEMO_MODE else 'disabled'}")
+
+# Global variable for storing last provision VMs data
+last_provision_vms = []
 
 
 @app.route("/get_demo_mode", methods=["GET"])
@@ -234,9 +238,10 @@ def get_current_functions():
         app.logger.info("Returning MOCK functions for DEMO_MODE=True")
         # Try to load the demo mode function for realistic logs
         try:
-            from .vm_provision import provision_vms_demo_mode
+            from vm_provision import provision_vms_demo_mode
             demo_func = provision_vms_demo_mode
-        except ImportError:
+        except ImportError as e:
+            app.logger.error(f"Failed to import provision_vms_demo_mode: {e}")
             demo_func = None
             
         return {
@@ -251,7 +256,7 @@ def get_current_functions():
     else:
         app.logger.info("Attempting to load REAL vCenter functions for DEMO_MODE=False")
         try:
-            from .vm_provision import (
+            from vm_provision import (
                 provision_vms,
                 provision_vms_demo_mode,
                 get_template_names,
@@ -386,7 +391,7 @@ def login():
             pass  # The AJAX part handles vCenter login
 
     return render_template_string(
-        open("vm_provisioning/templates/login.html", "r", encoding="utf-8").read(),
+        open("templates/login.html", "r", encoding="utf-8").read(),
         error=error,
         demo_mode=DEMO_MODE,  # Use current global DEMO_MODE value
     )
@@ -441,6 +446,7 @@ def vcenter_login():
             session["vcenter_user"] = vcenter_user
             session["vcenter_pass"] = vcenter_pass
             session["login_time"] = datetime.now().isoformat()
+            session.permanent = True  # Ensure session is permanent after vCenter login
 
             message = "Successfully connected to vCenter!"
             if DEMO_MODE:
@@ -867,7 +873,7 @@ def dashboard():
         }
 
         return render_template_string(
-            open("vm_provisioning/templates/dashboard.html", "r", encoding="utf-8").read(),
+            open("templates/dashboard.html", "r", encoding="utf-8").read(),
             stats=stats,
             templates=templates[:5],
             session=session,
@@ -903,17 +909,12 @@ def provision():
             is_individual_config = request.form.get("individualConfig") == "on"
 
             ip_map = {}
+            individual_nodes_data = None
             if is_individual_config:
-                # Handle individual node data
                 individual_nodes_data_str = request.form.get("individual_nodes_data")
                 if not individual_nodes_data_str:
                     raise ValueError("Individual node configuration data is missing.")
-
                 individual_nodes_data = json.loads(individual_nodes_data_str)
-
-                # For now, we'll just log this and use dummy bulk values for provision_vms
-                # You'll need to extend provision_vms or create a new function
-                # in vm_provision.py to handle this structured data.
                 log_queue.put(
                     f"ℹ️ Backend received individual node config: {len(individual_nodes_data)} nodes."
                 )
@@ -921,24 +922,17 @@ def provision():
                     log_queue.put(
                         f"   Node {i+1}: Name='{node.get('name')}', Hostname='{node.get('hostname')}', IPs={node.get('ips')}"
                     )
-
-                # Use dummy values for prefix and count for provision_vms call in demo mode
-                # This part needs to be replaced with actual individual provisioning logic
                 prefix = "individual-vm"
                 count = len(individual_nodes_data)
-                # Example: take IPs from the first node for the bulk call (temporary)
                 if individual_nodes_data:
                     first_node_ips = individual_nodes_data[0].get("ips", {})
                     for nic_key, ip_val in first_node_ips.items():
                         ip_map[nic_key] = ip_val
-
             else:
-                # Handle bulk configuration data
                 prefix = request.form.get("prefix", "").strip()
                 count = int(request.form.get("count", 1))
-
-                # Validate bulk inputs
-                if not all([prefix]):  # count is already int
+                hostname_prefix = request.form.get("hostname", "").strip()
+                if not all([prefix]):
                     raise ValueError("VM Name Prefix is required for bulk provisioning")
                 if count < 1 or count > 50:
                     raise ValueError("Number of VMs must be between 1 and 50")
@@ -946,42 +940,31 @@ def provision():
                     raise ValueError(
                         "Prefix can only contain letters, numbers, hyphens, and underscores"
                     )
-
-                # Get IP mappings for bulk mode
-                for i in range(1, 10):  # Assuming max 9 NICs
+                for i in range(1, 10):
                     ip_val = request.form.get(f"ip{i}", "").strip()
                     if ip_val:
                         if not validate_ip(ip_val):
                             raise ValueError(f"Invalid IP address format for NIC {i}")
                         ip_map[f"net{i}"] = ip_val
-
-            # Validate common fields
             if not all([template, datacenter, cluster, network]):
                 raise ValueError(
                     "Template, Datacenter, Cluster, and Network are required"
                 )
-
-            # Capture session data before starting background thread
             vcenter_host = session["vcenter_host"]
             vcenter_user = session["vcenter_user"]
             vcenter_pass = session["vcenter_pass"]
             username = session.get("username", "Unknown")
-            
-            # Start provisioning in background
-            def task():
-                try:
-                    # Check if we're in DEMO_MODE and use appropriate function
-                    if DEMO_MODE:
-                        # Use the new demo mode function with realistic logs
+            if DEMO_MODE:
+                # ใช้ queue เพื่อรับผลลัพธ์จาก thread
+                result_queue = queue.Queue()
+                def task():
+                    try:
                         current_functions = get_current_functions()
                         demo_provision_func = current_functions.get('provision_vms_demo_mode')
-                        
                         if demo_provision_func:
-                            # Pass individual_nodes_data to demo function if available
                             individual_data = None
                             if is_individual_config and individual_nodes_data:
                                 individual_data = individual_nodes_data
-                            
                             result = demo_provision_func(
                                 vcenter_host,
                                 vcenter_user,
@@ -995,58 +978,93 @@ def provision():
                                 ip_map,
                                 logger=log_queue.put,
                                 individual_nodes_data=individual_data,
+                                hostname_prefix=hostname_prefix if not is_individual_config else None,
                             )
+                            # ส่ง vms array กลับมาทาง queue
+                            if isinstance(result, dict) and 'vms' in result:
+                                result_queue.put(result['vms'])
+                                log_queue.put(f"📊 VMs data prepared: {len(result['vms'])} VMs")
+                                # Debug: แสดง vms data
+                                for i, vm in enumerate(result['vms']):
+                                    log_queue.put(f"   VM{i+1}: {vm}")
+                                log_queue.put("✅ Demo provisioning completed successfully!")
+                            else:
+                                result_queue.put([])
+                                log_queue.put("⚠️ No VMs data in result")
+                                log_queue.put(f"Result type: {type(result)}")
+                                log_queue.put(f"Result content: {result}")
                         else:
-                            # Fallback to regular demo provision
-                            result = provision_vms(
-                                vcenter_host,
-                                vcenter_user,
-                                vcenter_pass,
-                                template,
-                                prefix,
-                                count,
-                                datacenter,
-                                cluster,
-                                network,
-                                ip_map,
-                                logger=log_queue.put,
-                            )
-                    else:
-                        # Production mode - use real provisioning with timeout protection
-                        log_queue.put("🏭 PRODUCTION MODE: Starting real VM provisioning")
-                        log_queue.put("⏱️  Timeout protection: 30 seconds maximum")
-                        
-                        # The provision_vms function currently only supports bulk parameters.
-                        # If is_individual_config is True, the prefix, count, and ip_map here
-                        # will be derived from the individual_nodes_data as a temporary measure.
-                        # For full individual provisioning, provision_vms in vm_provision.py
-                        # needs to be refactored or a new function created.
-                        result = provision_vms(
-                            vcenter_host,
-                            vcenter_user,
-                            vcenter_pass,
-                            template,
-                            prefix,
-                            count,
-                            datacenter,
-                            cluster,
-                            network,
-                            ip_map,
-                            logger=log_queue.put,
-                            timeout_seconds=30,  # 30 second timeout for production
-                        )
-                    
+                            result_queue.put([])
+                            log_queue.put("⚠️ Demo provision function not found")
+                    except Exception as e:
+                        result_queue.put([])
+                        log_queue.put(f"❌ Demo provision error: {str(e)}")
+                t = threading.Thread(target=task, daemon=True)
+                t.start()
+                # ไม่ต้อง join() เพื่อให้ frontend ได้รับ log ก่อน
+                # vms_result = result_queue.get()
+                # session['last_provision_vms'] = vms_result
+                # return jsonify({'status': 'success', 'message': 'Provisioning completed', 'vms': vms_result})
+                
+                # ส่ง vms array ผ่าน eventSource เมื่อเสร็จ
+                def save_vms_result():
+                    global last_provision_vms
+                    try:
+                        log_queue.put("⏳ Waiting for VMs data...")
+                        vms_result = result_queue.get(timeout=60)  # เพิ่ม timeout เป็น 60 วินาที
+                        # ใช้ global variable แทน session
+                        last_provision_vms = vms_result
+                        log_queue.put(f"📊 VMs data saved: {len(vms_result)} VMs")
+                        if vms_result:
+                            for vm in vms_result:
+                                log_queue.put(f"   • {vm.get('name', 'Unknown')}: {vm.get('status', 'Unknown')} - {vm.get('ips', 'No IP')}")
+                        else:
+                            log_queue.put("⚠️ No VMs data received")
+                    except queue.Empty:
+                        log_queue.put("⚠️ Timeout waiting for VMs data (60s)")
+                        last_provision_vms = []
+                    except Exception as e:
+                        log_queue.put(f"⚠️ Error waiting for VMs data: {str(e)}")
+                        last_provision_vms = []
+                
+                # เริ่ม thread สำหรับเก็บ vms result
+                save_thread = threading.Thread(target=save_vms_result, daemon=True)
+                save_thread.start()
+            else:
+                # Production mode - use real provisioning with per-VM customization
+                try:
+                    log_queue.put("🏭 PRODUCTION MODE: Starting real VM provisioning with per-VM customization")
+                    result = provision_vms(
+                        vcenter_host,
+                        vcenter_user,
+                        vcenter_pass,
+                        template,
+                        prefix,
+                        count,
+                        datacenter,
+                        cluster,
+                        network,
+                        ip_map,
+                        logger=log_queue.put,
+                        timeout_seconds=30,
+                        individual_nodes_data=individual_nodes_data if is_individual_config else None,
+                    )
                     log_queue.put(f"✅ {result}")
                     logging.info(
                         f"Provisioning completed by {username}: {result}"
                     )
                 except Exception as e:
-                    error_msg = f"❌ Error: {str(e)}"
-                    log_queue.put(error_msg)
-                    logging.error(f"Provisioning failed: {str(e)}")
-
-            threading.Thread(target=task, daemon=True).start()
-
+                    # Enhanced error handling for production provisioning
+                    error_msg = str(e)
+                    log_queue.put(f"❌ ERROR: Provisioning failed: {error_msg}")
+                    if "customiz" in error_msg.lower():
+                        log_queue.put("❗ Guest Customization failed. Please check that your template has VMware Tools installed, network config is not hardcoded, and OS is supported by vSphere Guest Customization.")
+                    elif "vcenter" in error_msg.lower() or "connect" in error_msg.lower():
+                        log_queue.put("❗ vCenter connection or resource discovery failed. Please check vCenter credentials, network, and permissions.")
+                    else:
+                        log_queue.put("❗ An unexpected error occurred during provisioning. Please check logs and vSphere tasks for more details.")
+                    logging.error(f"Provisioning failed for user {username}: {error_msg}")
+                    return jsonify({"status": "error", "message": error_msg}), 500
             # Add initial logs to queue for immediate streaming
             log_queue.put("🚀 Starting VM provisioning...")
             log_queue.put("📋 Configuration validated successfully")
@@ -1077,21 +1095,14 @@ def provision():
             print(f"Validation error: {str(e)}")  # Debug print on server console
             return jsonify({"error": str(e), "status": "error"}), 400  # Bad Request
         except Exception as e:
-            # Return JSON error for AJAX requests
-            print(f"Server error: {str(e)}")  # Debug print on server console
-            return (
-                jsonify(
-                    {
-                        "error": f"Error starting provisioning: {str(e)}",
-                        "status": "error",
-                    }
-                ),
-                500,
-            )  # Internal Server Error
+            # Top-level error handler for form/validation errors
+            error_msg = str(e)
+            log_queue.put(f"❌ ERROR: {error_msg}")
+            return jsonify({"status": "error", "message": error_msg}), 400
 
     # For GET requests, render the HTML template
     return render_template_string(
-        open("vm_provisioning/templates/provision.html", "r", encoding="utf-8").read()
+        open("templates/provision.html", "r", encoding="utf-8").read()
     )
 
 
@@ -1212,6 +1223,19 @@ def get_nic_count_api():
         return jsonify({"count": count})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+@app.route('/favicon.ico')
+def favicon():
+    return send_from_directory(
+        os.path.join(app.root_path, 'static'),
+        'favicon.ico', mimetype='image/vnd.microsoft.icon')
+
+
+@app.route('/api/last-provision-vms')
+def api_last_provision_vms():
+    global last_provision_vms
+    return jsonify({'vms': last_provision_vms})
 
 
 if __name__ == "__main__":

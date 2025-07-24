@@ -1339,6 +1339,10 @@
                                     <label for="count">Number of VMs <span class="required">*</span></label>
                                     <input type="number" name="count" id="count" min="1" max="50" value="5" required>
                                 </div>
+                                <div class="form-group">
+                                    <label for="hostname">Hostname Prefix</label>
+                                    <input type="text" name="hostname" id="hostname" placeholder="e.g., webserver" pattern="[a-zA-Z0-9\-_.]+">
+                                </div>
                             </div>
                         </div>
 
@@ -1578,6 +1582,8 @@ Example configuration:
         let nodeCount = 1;
         let nicCount = 2; // Assuming 2 NICs for simplicity, adjust based on actual template NICs
         let provisionTimeout = null; // Variable to hold the timeout ID
+        // เพิ่มตัวแปร global
+        let lastProvisionedVMs = null;
 
         // Helper function to display flash messages
         function displayFlashMessage(message, category, isValidation = false) {
@@ -1628,26 +1634,52 @@ Example configuration:
                     name: vmName,
                     hostname: vmConfig.hostname || `${vmName.toLowerCase()}.local`,
                     ips: vmConfig.ips || {},
-                    status: 'pending',
-                    progress: 0
+                    status: vmConfig.status || 'pending',
+                    progress: vmConfig.progress || 0
                 };
+                
+                // Format IPs properly
+                let ipsDisplay = '-';
+                if (vmStatusData[vmName].ips) {
+                    if (typeof vmStatusData[vmName].ips === 'string') {
+                        ipsDisplay = vmStatusData[vmName].ips;
+                    } else if (typeof vmStatusData[vmName].ips === 'object') {
+                        // Convert object to string
+                        const ipValues = Object.values(vmStatusData[vmName].ips).filter(ip => ip);
+                        ipsDisplay = ipValues.length > 0 ? ipValues.join(', ') : 'DHCP';
+                    }
+                } else {
+                    // ถ้าไม่มี IPs ให้แสดง DHCP
+                    ipsDisplay = 'DHCP';
+                }
+                
+                // Debug: Log IP information
+                console.log(`VM ${vmName} IPs:`, {
+                    originalIps: vmStatusData[vmName].ips,
+                    type: typeof vmStatusData[vmName].ips,
+                    display: ipsDisplay,
+                    hasIps: !!vmStatusData[vmName].ips,
+                    ipsLength: vmStatusData[vmName].ips ? Object.keys(vmStatusData[vmName].ips).length : 0
+                });
                 
                 const row = document.createElement('tr');
                 row.id = `status-row-${vmName}`;
                 row.innerHTML = `
                     <td class="node-name">${vmName}</td>
-                    <td class="hostname">${vmStatusData[vmName].hostname}</td>
-                    <td>${Object.values(vmStatusData[vmName].ips).join(', ') || 'DHCP'}</td>
+                    <td class="hostname">${vmStatusData[vmName].hostname || '-'}</td>
+                    <td>${ipsDisplay}</td>
                     <td>
-                        <div class="vm-status pending" id="status-${vmName}">
-                            Pending
+                        <div class="vm-status ${vmStatusData[vmName].status}" id="status-${vmName}">
+                            ${vmStatusData[vmName].status === 'success' ? 'Success' :
+                              vmStatusData[vmName].status === 'failed' ? 'Failed' :
+                              vmStatusData[vmName].status === 'provisioning' ? 'Provisioning' : 'Pending'}
                         </div>
                     </td>
                     <td>
                         <div class="progress-bar">
-                            <div class="progress-fill" id="progress-${vmName}" style="width: 0%"></div>
+                            <div class="progress-fill" id="progress-${vmName}" style="width: ${vmStatusData[vmName].progress}%"></div>
                         </div>
-                        <small id="progress-text-${vmName}">Waiting...</small>
+                        <small id="progress-text-${vmName}">${vmStatusData[vmName].progress === 100 ? 'Complete!' : 'Waiting...'}</small>
                     </td>
                 `;
                 statusTableBody.appendChild(row);
@@ -1657,6 +1689,23 @@ Example configuration:
             console.log('Showing status table');
             statusContainer.style.display = 'block';
             statusContainer.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            
+            // Debug: Verify all elements were created
+            setTimeout(() => {
+                console.log('=== Status Table Verification ===');
+                for (const vmName in vmStatusData) {
+                    const statusElement = document.getElementById(`status-${vmName}`);
+                    const progressElement = document.getElementById(`progress-${vmName}`);
+                    const progressTextElement = document.getElementById(`progress-text-${vmName}`);
+                    
+                    console.log(`VM ${vmName} elements:`, {
+                        statusElement: !!statusElement,
+                        progressElement: !!progressElement,
+                        progressTextElement: !!progressTextElement
+                    });
+                }
+                console.log('=== End Verification ===');
+            }, 100);
         }
         
         function updateVMStatus(vmName, status, progress = null, message = null) {
@@ -1664,6 +1713,7 @@ Example configuration:
             
             if (!vmStatusData[vmName]) {
                 console.warn('VM not found in statusData:', vmName);
+                console.log('Available VMs:', Object.keys(vmStatusData));
                 return;
             }
             
@@ -1671,7 +1721,11 @@ Example configuration:
             const progressElement = document.getElementById(`progress-${vmName}`);
             const progressTextElement = document.getElementById(`progress-text-${vmName}`);
             
-            console.log('Status elements:', statusElement, progressElement, progressTextElement);
+            console.log('Status elements found:', {
+                statusElement: !!statusElement,
+                progressElement: !!progressElement,
+                progressTextElement: !!progressTextElement
+            });
             
             if (statusElement) {
                 // Update status
@@ -1693,30 +1747,140 @@ Example configuration:
                         break;
                 }
                 console.log('Updated status element:', statusElement.textContent, statusElement.className);
+            } else {
+                console.warn('Status element not found for VM:', vmName);
             }
             
             if (progress !== null && progressElement) {
                 vmStatusData[vmName].progress = progress;
                 progressElement.style.width = `${progress}%`;
-                console.log('Updated progress:', progress + '%');
+                console.log('Updated progress bar:', progress + '%', 'for VM:', vmName);
+            } else if (progress !== null) {
+                console.warn('Progress element not found for VM:', vmName);
             }
             
             if (message && progressTextElement) {
                 progressTextElement.textContent = message;
-                console.log('Updated progress text:', message);
+                console.log('Updated progress text:', message, 'for VM:', vmName);
+            } else if (message) {
+                console.warn('Progress text element not found for VM:', vmName);
+            }
+            
+            // Force a visual update
+            if (progressElement) {
+                progressElement.style.transition = 'width 0.3s ease';
             }
         }
         
         function parseLogForVMUpdates(logMessage) {
             console.log('Parsing log message:', logMessage);
+            console.log('Log message length:', logMessage.length);
+            console.log('Log message type:', typeof logMessage);
             
             // Parse log messages to update VM status
-            // Looking for patterns like:
-            // "🔄 [1/3] Creating VM: test01"
-            // "✅ VM test01 cloned successfully"
-            // "🟢 VM test01 powered on successfully"
-            // "✅ Guest OS boot completed - VM test01 ready"
+            // Demo Mode patterns:
+            // "🚀 Starting VM 1/3: test01"
+            // "📋 Validating configuration for test01"
+            // "🌐 Detecting network zones for test01"
+            // "💾 Cloning template for test01"
+            // "⚙️ Applying customization for test01"
+            // "🔧 Configuring network for test01"
+            // "✅ VM test01 ready!"
             
+            // Demo Mode: VM starting - improved pattern matching
+            const vmStartingMatch = logMessage.match(/🚀 Starting VM \d+\/\d+: (\w+)/);
+            if (vmStartingMatch) {
+                const vmName = vmStartingMatch[1];
+                console.log('VM starting detected (Demo):', vmName);
+                updateVMStatus(vmName, 'provisioning', 10, 'Starting...');
+                return;
+            }
+            
+            // Demo Mode: Configuration validation
+            const vmValidatingMatch = logMessage.match(/📋 Validating configuration for (\w+)/);
+            if (vmValidatingMatch) {
+                const vmName = vmValidatingMatch[1];
+                console.log('VM validating (Demo):', vmName);
+                updateVMStatus(vmName, 'provisioning', 20, 'Validating...');
+                return;
+            }
+            
+            // Demo Mode: Network detection
+            const vmNetworkMatch = logMessage.match(/🌐 Detecting network zones for (\w+)/);
+            if (vmNetworkMatch) {
+                const vmName = vmNetworkMatch[1];
+                console.log('VM network detection (Demo):', vmName);
+                updateVMStatus(vmName, 'provisioning', 30, 'Network setup...');
+                return;
+            }
+            
+            // Demo Mode: Cloning
+            const vmCloningMatch = logMessage.match(/💾 Cloning template for (\w+)/);
+            if (vmCloningMatch) {
+                const vmName = vmCloningMatch[1];
+                console.log('VM cloning (Demo):', vmName);
+                updateVMStatus(vmName, 'provisioning', 40, 'Cloning...');
+                return;
+            }
+            
+            // Demo Mode: Clone progress - improved pattern matching
+            const vmCloneProgressMatch = logMessage.match(/📈 Clone progress: (\d+)% - VM (\w+)/);
+            if (vmCloneProgressMatch) {
+                const progress = parseInt(vmCloneProgressMatch[1]);
+                const vmName = vmCloneProgressMatch[2];
+                const baseProgress = 40 + (progress * 0.3); // 40% to 70%
+                console.log('VM clone progress (Demo):', vmName, progress, 'Base progress:', Math.round(baseProgress));
+                updateVMStatus(vmName, 'provisioning', Math.round(baseProgress), `Cloning: ${progress}%`);
+                return;
+            }
+            
+            // Demo Mode: VM cloned successfully
+            const vmClonedMatch = logMessage.match(/✅ VM (\w+) cloned successfully/);
+            if (vmClonedMatch) {
+                const vmName = vmClonedMatch[1];
+                console.log('VM cloned (Demo):', vmName);
+                updateVMStatus(vmName, 'provisioning', 75, 'Clone completed');
+                return;
+            }
+            
+            // Demo Mode: Customization
+            const vmCustomizingMatch = logMessage.match(/⚙️ Applying customization for (\w+)/);
+            if (vmCustomizingMatch) {
+                const vmName = vmCustomizingMatch[1];
+                console.log('VM customizing (Demo):', vmName);
+                updateVMStatus(vmName, 'provisioning', 80, 'Customizing...');
+                return;
+            }
+            
+            // Demo Mode: Network configuration
+            const vmNetworkConfigMatch = logMessage.match(/🔧 Configuring network for (\w+)/);
+            if (vmNetworkConfigMatch) {
+                const vmName = vmNetworkConfigMatch[1];
+                console.log('VM network config (Demo):', vmName);
+                updateVMStatus(vmName, 'provisioning', 85, 'Network config...');
+                return;
+            }
+            
+            // Demo Mode: VM powered on
+            const vmPoweredMatch = logMessage.match(/🟢 VM (\w+) powered on successfully/);
+            if (vmPoweredMatch) {
+                const vmName = vmPoweredMatch[1];
+                console.log('VM powered on (Demo):', vmName);
+                updateVMStatus(vmName, 'provisioning', 90, 'Powering on...');
+                return;
+            }
+            
+            // Demo Mode: Guest OS boot completed
+            const vmGuestReadyMatch = logMessage.match(/✅ Guest OS boot completed - VM (\w+) ready/);
+            if (vmGuestReadyMatch) {
+                const vmName = vmGuestReadyMatch[1];
+                console.log('VM ready (Demo):', vmName);
+                updateVMStatus(vmName, 'success', 100, 'Ready!');
+                updateVMIPsCell(vmName);
+                return;
+            }
+            
+            // Production Mode patterns (keep existing):
             const vmCreatingMatch = logMessage.match(/🔄 \[\d+\/\d+\] Creating VM: (\w+)/);
             if (vmCreatingMatch) {
                 const vmName = vmCreatingMatch[1];
@@ -1725,37 +1889,38 @@ Example configuration:
                 return;
             }
             
-            const vmCloningMatch = logMessage.match(/📈 Clone progress: (\d+)% - VM (\w+)/);
-            if (vmCloningMatch) {
-                const progress = parseInt(vmCloningMatch[1]);
-                const vmName = vmCloningMatch[2];
+            const vmCloningProgressMatch = logMessage.match(/📈 Clone progress: (\d+)% - VM (\w+)/);
+            if (vmCloningProgressMatch) {
+                const progress = parseInt(vmCloningProgressMatch[1]);
+                const vmName = vmCloningProgressMatch[2];
                 const baseProgress = 10 + (progress * 0.6); // 10% to 70%
                 console.log('VM cloning progress:', vmName, progress);
                 updateVMStatus(vmName, 'provisioning', Math.round(baseProgress), `Cloning: ${progress}%`);
                 return;
             }
             
-            const vmClonedMatch = logMessage.match(/✅ VM (\w+) cloned successfully/);
-            if (vmClonedMatch) {
-                const vmName = vmClonedMatch[1];
+            const vmClonedProdMatch = logMessage.match(/✅ VM (\w+) cloned successfully/);
+            if (vmClonedProdMatch) {
+                const vmName = vmClonedProdMatch[1];
                 console.log('VM cloned:', vmName);
                 updateVMStatus(vmName, 'provisioning', 75, 'Clone completed');
                 return;
             }
             
-            const vmPoweredMatch = logMessage.match(/🟢 VM (\w+) powered on successfully/);
-            if (vmPoweredMatch) {
-                const vmName = vmPoweredMatch[1];
+            const vmPoweredProdMatch = logMessage.match(/🟢 VM (\w+) powered on successfully/);
+            if (vmPoweredProdMatch) {
+                const vmName = vmPoweredProdMatch[1];
                 console.log('VM powered on:', vmName);
                 updateVMStatus(vmName, 'provisioning', 90, 'Powering on...');
                 return;
             }
             
-            const vmReadyMatch = logMessage.match(/✅ Guest OS boot completed - VM (\w+) ready/);
-            if (vmReadyMatch) {
-                const vmName = vmReadyMatch[1];
+            const vmGuestReadyProdMatch = logMessage.match(/✅ Guest OS boot completed - VM (\w+) ready/);
+            if (vmGuestReadyProdMatch) {
+                const vmName = vmGuestReadyProdMatch[1];
                 console.log('VM ready:', vmName);
                 updateVMStatus(vmName, 'success', 100, 'Ready!');
+                updateVMIPsCell(vmName);
                 return;
             }
             
@@ -1764,6 +1929,7 @@ Example configuration:
                 const vmName = vmHealthMatch[1];
                 console.log('VM health check passed:', vmName);
                 updateVMStatus(vmName, 'success', 100, 'Complete!');
+                updateVMIPsCell(vmName);
                 return;
             }
             
@@ -1776,6 +1942,13 @@ Example configuration:
                     updateVMStatus(vmName, 'failed', vmStatusData[vmName].progress, 'Failed');
                 }
                 return;
+            }
+            
+            // Debug: Log unmatched messages for troubleshooting
+            if (logMessage.includes('VM') || logMessage.includes('🚀') || logMessage.includes('📋') || 
+                logMessage.includes('🌐') || logMessage.includes('💾') || logMessage.includes('⚙️') || 
+                logMessage.includes('🔧') || logMessage.includes('🟢') || logMessage.includes('✅')) {
+                console.log('Unmatched log message (might need new pattern):', logMessage);
             }
         }
         
@@ -1798,10 +1971,12 @@ Example configuration:
             
             if (isIndividualConfig) {
                 // Individual configuration validation
-                for (let i = 1; i <= nodeCount; i++) {
-                    const nameInput = document.querySelector(`input[name="node_${i}_name"]`);
-                    const hostnameInput = document.querySelector(`input[name="node_${i}_hostname"]`);
-                    
+                const nodeElements = document.querySelectorAll('.node-config');
+                for (let idx = 0; idx < nodeElements.length; idx++) {
+                    const nodeElement = nodeElements[idx];
+                    const i = parseInt(nodeElement.id.split('_')[1]);
+                    const nameInput = nodeElement.querySelector(`input[name="node_${i}_name"]`);
+                    const hostnameInput = nodeElement.querySelector(`input[name="node_${i}_hostname"]`);
                     if (!nameInput || !nameInput.value.trim()) {
                         displayFlashMessage(`Node ${i}: VM Name is required.`, 'error', true);
                         if (nameInput) nameInput.focus();
@@ -1832,9 +2007,20 @@ Example configuration:
                         return false;
                     }
                     
+                    // Get IP addresses for this node
+                    const ips = {};
+                    const ipInputs = nodeElement.querySelectorAll('input[name^="node_' + i + '_ip"]');
+                    ipInputs.forEach((ipInput, idx) => {
+                        const ipValue = ipInput.value.trim();
+                        if (ipValue) {
+                            ips[`net${idx + 1}`] = ipValue;
+                        }
+                    });
+                    
                     vmConfigs.push({
                         name: vmName,
-                        hostname: hostname
+                        hostname: hostname,
+                        ips: ips
                     });
                 }
             } else {
@@ -1868,12 +2054,55 @@ Example configuration:
                     return false;
                 }
                 
+                // Get starting IPs for bulk mode
+                const startingIPs = [];
+                const ipInputs = document.querySelectorAll('#bulkIPs input[type="text"]');
+                ipInputs.forEach((ipInput, idx) => {
+                    startingIPs[idx] = ipInput.value.trim();
+                });
+                
+                // Get hostname prefix
+                const hostnamePrefix = document.getElementById('hostname').value.trim();
+                
                 // Generate VM names for validation
                 for (let i = 1; i <= count; i++) {
                     const vmName = `${prefix}${i.toString().padStart(2, '0')}`;
+                    
+                    // Generate hostname
+                    let hostname = '';
+                    if (hostnamePrefix) {
+                        hostname = `${hostnamePrefix}${i.toString().padStart(2, '0')}`;
+                    } else {
+                        hostname = `${vmName.toLowerCase()}.local`;
+                    }
+                    
+                    // Generate IPs for this VM
+                    const ips = {};
+                    startingIPs.forEach((startIP, idx) => {
+                        if (startIP) {
+                            ips[`net${idx + 1}`] = incrementIP(startIP, i - 1);
+                        }
+                    });
+                    
+                    // Convert IPs object to string for display (like backend does)
+                    let ipsString = '-';
+                    const ipValues = Object.values(ips).filter(ip => ip);
+                    if (ipValues.length > 0) {
+                        ipsString = ipValues.join(', ');
+                    }
+                    
+                    // Debug: Log IP generation
+                    console.log(`Generated IPs for ${vmName}:`, {
+                        startingIPs: startingIPs,
+                        generatedIps: ips,
+                        ipsString: ipsString,
+                        hasIps: Object.keys(ips).length > 0
+                    });
+                    
                     vmConfigs.push({
                         name: vmName,
-                        hostname: `${vmName.toLowerCase()}.local`
+                        hostname: hostname,
+                        ips: ipsString
                     });
                 }
             }
@@ -1928,6 +2157,19 @@ Example configuration:
             }
             
             console.log('Configuration validation passed:', vmConfigs);
+            
+            // Debug: Log each VM config with IPs
+            vmConfigs.forEach((vmConfig, index) => {
+                console.log(`VM Config ${index + 1}:`, {
+                    name: vmConfig.name,
+                    hostname: vmConfig.hostname,
+                    ips: vmConfig.ips,
+                    ipsType: typeof vmConfig.ips,
+                    ipsKeys: vmConfig.ips ? Object.keys(vmConfig.ips) : [],
+                    ipsValues: vmConfig.ips ? Object.values(vmConfig.ips) : []
+                });
+            });
+            
             return vmConfigs;
         }
         
@@ -1965,33 +2207,7 @@ Example configuration:
         }
         
         function startNewProvisioning() {
-            console.log('Starting new provisioning session...');
-            
-            // Clear current session data
-            clearCurrentProvisioning();
-            
-            // Close completion menu
-            closeCompletionMenu();
-            
-            // Reset form to initial state
-            resetFormToInitialState();
-            
-            // Scroll to top of form
-            document.querySelector('.form-card').scrollIntoView({ 
-                behavior: 'smooth', 
-                block: 'start' 
-            });
-            
-            // Show helpful message
-            displayFlashMessage('🚀 Ready to provision new VMs! Configure your settings below.', 'success');
-            
-            // Focus on template selection after scroll
-            setTimeout(() => {
-                const templateSelect = document.getElementById('template');
-                if (templateSelect) {
-                    templateSelect.focus();
-                }
-            }, 800);
+            window.location.href = "/provision";
         }
         
         function resetFormToInitialState() {
@@ -2023,6 +2239,7 @@ Example configuration:
                     <span>Select a template to auto-detect network zones...</span>
                 </div>
             `;
+            networkDisplay.classList.remove('detected');
             
             // Clear hidden network fields
             document.getElementById('network').value = '';
@@ -2283,6 +2500,12 @@ Example configuration:
 
         // Load initial data when page loads
         document.addEventListener('DOMContentLoaded', function() {
+            // Sync demo_mode from backend to sessionStorage ทุกครั้งที่โหลดหน้า
+            fetch('/get_demo_mode')
+              .then(res => res.json())
+              .then(data => {
+                sessionStorage.setItem('demo_mode', data.demo_mode ? 'true' : 'false');
+              });
             console.log('Page loaded, initializing...');
             setupEventListeners();
             updateNodeIPFields(); // Initialize IP fields for the first node if individual config is active
@@ -2317,7 +2540,39 @@ Example configuration:
         function setupEventListeners() {
             // Template selection to auto-detect network zone
             document.getElementById('template').addEventListener('change', function() {
+                // Reset network display UI ทุกครั้ง
+                const networkDisplay = document.getElementById('networkDisplay');
+                if (networkDisplay) {
+                    networkDisplay.innerHTML = `
+                        <div class="network-zone-indicator waiting">
+                            <span class="zone-icon">🔍</span>
+                            <span>Select a template to auto-detect network zones...</span>
+                        </div>
+                    `;
+                    networkDisplay.classList.remove('detected');
+                }
+                // Dynamic NIC count by template
+                if (this.value === 'CentOS-8-Template') {
+                    nicCount = 3;
+                } else {
+                    nicCount = 2;
+                }
                 detectNetworkZone(this.value);
+                updateNodeIPFields(); // อัปเดต field IP ของแต่ละ node ให้ตรง nicCount ใหม่
+                // อัปเดต field IP bulk mode
+                const nicFields = document.getElementById('nic-fields');
+                if (nicFields) {
+                    nicFields.innerHTML = '';
+                    for (let j = 1; j <= nicCount; j++) {
+                        const nicField = document.createElement('div');
+                        nicField.className = 'nic-field';
+                        nicField.innerHTML = `
+                            <span class="nic-label">NIC ${j}</span>
+                            <input type="text" name="ip${j}" placeholder="10.${j === 1 ? '10' : '20'}.10.10 (starting IP)" pattern="^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$">
+                        `;
+                        nicFields.appendChild(nicField);
+                    }
+                }
             });
 
             // Individual configuration toggle
@@ -2396,10 +2651,21 @@ Example configuration:
 
         function detectNetworkZone(templateValue) {
             const networkDisplay = document.getElementById('networkDisplay');
-            const detectedNetwork = document.getElementById('detectedNetwork');
+            let zoneIndicator = networkDisplay.querySelector('.network-zone-indicator');
+            let detectedNetwork = networkDisplay.querySelector('#detectedNetwork');
+            // ถ้าไม่มี zoneIndicator ให้สร้างใหม่
+            if (!zoneIndicator) {
+                zoneIndicator = document.createElement('div');
+                zoneIndicator.className = 'network-zone-indicator waiting';
+                detectedNetwork = document.createElement('span');
+                detectedNetwork.id = 'detectedNetwork';
+                detectedNetwork.textContent = 'Select a template to detect network zones';
+                zoneIndicator.appendChild(detectedNetwork);
+                networkDisplay.innerHTML = '';
+                networkDisplay.appendChild(zoneIndicator);
+            }
             const networkInput = document.getElementById('network');
             const networkZonesInput = document.getElementById('networkZones');
-            const zoneIndicator = document.querySelector('.network-zone-indicator');
             
             if (!templateValue) {
                 // Reset to default state
@@ -2417,7 +2683,8 @@ Example configuration:
             const networkMapping = {
                 'CentOS-8-Template': {
                     nic1: 'Web-VLAN-100',
-                    nic2: 'Management-VLAN-200'
+                    nic2: 'Management-VLAN-200',
+                    nic3: 'Backup-VLAN-400'
                 },
                 'Ubuntu-20.04-Template': {
                     nic1: 'Web-VLAN-100',
@@ -2430,77 +2697,39 @@ Example configuration:
             };
 
             const detectedZones = networkMapping[templateValue];
-            
             if (detectedZones) {
-                // Clear previous network zones list
-                const existingNetworkZonesList = zoneIndicator.querySelector('.network-zones-list');
-                if (existingNetworkZonesList) {
-                    existingNetworkZonesList.remove();
-                }
-
-                // Create network zones display
+                // Render network zones mapping ตามจริง
                 const networkZonesList = document.createElement('div');
                 networkZonesList.className = 'network-zones-list';
-                
-                // Add each NIC zone
-                for (let i = 1; i <= nicCount; i++) { // Use nicCount from global scope
-                    const zoneKey = `nic${i}`;
-                    const zoneName = detectedZones[zoneKey];
-                    
-                    if (zoneName) {
+                Object.entries(detectedZones).forEach(([nic, zone], idx) => {
                         const zoneItem = document.createElement('div');
                         zoneItem.className = 'network-zone-item';
                         zoneItem.innerHTML = `
-                            <span class="nic-badge">NIC ${i}</span>
-                            <span class="zone-name">${zoneName}</span>
+                        <span class="nic-badge">${nic.toUpperCase()}</span>
+                        <span class="zone-name">${zone}</span>
                         `;
                         networkZonesList.appendChild(zoneItem);
-                    }
-                }
-                
-                // Update display
-                detectedNetwork.textContent = ''; // Clear initial text
+                });
                 zoneIndicator.innerHTML = `
                     <span class="zone-icon">🌐</span>
                     <span>Auto-detected Network Zones:</span>
                 `;
                 zoneIndicator.appendChild(networkZonesList);
-                
-                // Store values
-                networkInput.value = detectedZones.nic1; // Primary network for compatibility with backend (if needed)
-                networkZonesInput.value = JSON.stringify(detectedZones);
-                
-                // Update display state
                 networkDisplay.classList.add('detected');
                 zoneIndicator.classList.add('detected');
-                zoneIndicator.classList.remove('waiting');
-                
-                // Update logs
-                const logs = document.getElementById('logs');
-                logs.textContent += `\n🎯 Network zones auto-detected:\n`;
-                for (let i = 1; i <= nicCount; i++) {
-                    const zoneKey = `nic${i}`;
-                    const zoneName = detectedZones[zoneKey];
-                    if (zoneName) {
-                        logs.textContent += `   NIC ${i}: ${zoneName}\n`;
-                    }
-                }
-                logs.scrollTop = logs.scrollHeight;
-                
-                // Update summary if visible
-                const summaryText = Object.entries(detectedZones)
-                    .map(([nic, zone]) => `${nic.toUpperCase()}: ${zone}`)
-                    .join(', ');
-                document.getElementById('summaryNetwork').textContent = summaryText;
-                
+                networkInput.value = detectedZones.nic1;
+                networkZonesInput.value = JSON.stringify(detectedZones);
             } else {
-                // Fallback for unknown templates
-                detectedNetwork.textContent = 'Network zones detection failed';
-                networkInput.value = '';
-                networkZonesInput.value = '';
+                // fallback
+                zoneIndicator.innerHTML = `
+                    <span class="zone-icon">🔍</span>
+                    <span>Select a template to auto-detect network zones...</span>
+                `;
                 networkDisplay.classList.remove('detected');
                 zoneIndicator.classList.remove('detected');
                 zoneIndicator.classList.add('waiting');
+                networkInput.value = '';
+                networkZonesInput.value = '';
             }
         }
 
@@ -2689,17 +2918,21 @@ Example configuration:
                 }
 
                 // Generate rows for bulk mode with auto-incrementing IPs
+                const hostnamePrefix = document.getElementById('hostname').value.trim();
                 for (let i = 1; i <= count; i++) {
                     const vmName = `${prefix}${i.toString().padStart(2, '0')}`;
-                    // Hostname generation logic can be more complex, this is a simple example
-                    const hostname = `${vmName.toLowerCase()}.${datacenter.toLowerCase().replace(/[^a-z0-9]/g, '')}.local`; 
-                    
+                    // Hostname generation logic: ใช้ hostnamePrefix ถ้ามี
+                    let hostname = '';
+                    if (hostnamePrefix) {
+                        hostname = `${hostnamePrefix}${i.toString().padStart(2, '0')}`;
+                    } else {
+                        hostname = `${vmName.toLowerCase()}.${datacenter.toLowerCase().replace(/[^a-z0-9]/g, '')}.local`;
+                    }
                     // Calculate incremented IPs for this VM
                     const vmIPs = startingIPs.map(startIP => {
                         if (!startIP) return 'DHCP';
                         return incrementIP(startIP, i - 1);
                     });
-                    
                     const row = document.createElement('tr');
                     row.innerHTML = `
                         <td><span class="node-number">${i}</span></td>
@@ -2760,7 +2993,11 @@ Example configuration:
             document.querySelector('.flash-messages').innerHTML = ''; // Clear flash messages
         }
 
+        // Start actual provisioning
         function startActualProvisioning() {
+            // Set timeout based on mode
+            let provisionTimeout = null;
+
             console.log('Starting actual provisioning...');
             
             if (isProvisioning) {
@@ -2815,12 +3052,22 @@ Example configuration:
 
             eventSource.onmessage = function(event) {
                 const logMessage = event.data;
+                console.log('EventSource received message:', logMessage);
+                console.log('EventSource message type:', typeof logMessage);
+                console.log('EventSource message length:', logMessage.length);
+                
                 if (logMessage.trim() !== '') {
                     logs.textContent += logMessage + '\n';
                     logs.scrollTop = logs.scrollHeight;
 
                     // Update VM status table based on log message
+                    console.log('Calling parseLogForVMUpdates with:', logMessage);
                     parseLogForVMUpdates(logMessage);
+                    
+                    // Debug VM status table every 10 messages
+                    if (Math.random() < 0.1) { // 10% chance to debug
+                        debugVMStatusTable();
+                    }
 
                     // Check for completion message to re-enable the button
                     // Demo Mode specific completion messages
@@ -2841,96 +3088,85 @@ Example configuration:
                     const isProdComplete = prodCompleteMessages.some(msg => logMessage.includes(msg));
                     
                     if (isDemoComplete || isProdComplete) {
+                        console.log('Provisioning completed, fetching final VMs data...');
+                        
+                        // Close EventSource after completion
+                        if (eventSource) {
+                            eventSource.close();
+                            eventSource = null;
+                        }
+                        
+                        // Fetch final VMs data
+                        setTimeout(() => {
+                            fetchProvisionedVMs().then((vms) => {
+                                if (vms && vms.length > 0) {
+                                    updateCompletionSummary(vms);
+                                } else {
+                                    console.warn('No VMs data received after completion');
+                                }
+                            }).catch((error) => {
+                                console.error('Error fetching VMs data after completion:', error);
+                            });
+                        }, 1000); // รอ 1 วินาทีหลังจากเสร็จสิ้น
+                        
+                        // Re-enable button
                         isProvisioning = false;
                         button.disabled = false;
                         btnText.textContent = '🚀 Start Provisioning';
                         spinner.style.display = 'none';
-                        // Clear the timeout when a final message is received
+                        
+                        // Clear timeout
                         if (provisionTimeout) {
                             clearTimeout(provisionTimeout);
                             provisionTimeout = null;
                         }
-                        // Keep the summary visible after completion, allow user to edit or start new
-                        // editConfiguration(); // Optional: return to form after completion
-                        if (eventSource) {
-                            eventSource.close(); // Close the SSE connection once done
-                            eventSource = null;
-                        }
-                        
-                        // Show completion message based on mode
-                        if (isDemoComplete) {
-                            displayFlashMessage("Demo provisioning simulation completed successfully!", "success");
-                        } else if (logMessage.includes("Provisioning completed successfully!")) {
-                            displayFlashMessage("Production provisioning completed successfully!", "success");
-                        }
-                        
-                        // Show completion menu with summary statistics
-                        setTimeout(() => {
-                            const summary = {
-                                total: Object.keys(vmStatusData).length,
-                                success: Object.values(vmStatusData).filter(vm => vm.status === 'success').length,
-                                failed: Object.values(vmStatusData).filter(vm => vm.status === 'failed').length,
-                                pending: Object.values(vmStatusData).filter(vm => vm.status === 'pending').length
-                            };
-                            showCompletionMenu(summary);
-                        }, 2000); // Show menu 2 seconds after completion
                     }
                 }
             };
 
-            eventSource.onerror = function(err) {
-                console.error("EventSource failed:", err);
-                logs.textContent += "❌ Error connecting to log stream. Provisioning might have failed or stream disconnected.\n";
+            eventSource.onerror = function(event) {
+                console.error('EventSource error:', event);
+                logs.textContent += '\n❌ Error connecting to log stream. Provisioning might have failed or stream disconnected.\n';
                 logs.scrollTop = logs.scrollHeight;
+                
+                // Try to fetch VMs data even if stream failed
+                        setTimeout(() => {
+                    fetchProvisionedVMs().then((vms) => {
+                        if (vms && vms.length > 0) {
+                            logs.textContent += '\n📊 Attempting to fetch final results...\n';
+                            updateCompletionSummary(vms);
+                        }
+                    }).catch((error) => {
+                        console.error('Error fetching VMs data:', error);
+                        logs.textContent += '\n⚠️ Could not fetch final results.\n';
+                    });
+                }, 2000);
+                
+                // Re-enable button after error
+                setTimeout(() => {
                 isProvisioning = false;
                 button.disabled = false;
                 btnText.textContent = '🚀 Start Provisioning';
                 spinner.style.display = 'none';
-                // Clear the timeout on error
-                if (provisionTimeout) {
-                    clearTimeout(provisionTimeout);
-                    provisionTimeout = null;
-                }
-                if (eventSource) {
-                    eventSource.close();
-                    eventSource = null;
-                }
+                }, 3000);
             };
             // -------------------------------------------------------------
 
             // Set timeout based on Demo/Production Mode
             // Demo Mode: Extended timeout (5 minutes) since it's simulation
-            // Production Mode: Standard timeout (45 seconds) matching server-side
-            // Check session storage or make AJAX call to get demo mode status
+            // Production Mode: No timeout (wait until provisioning completes)
             let isDemoMode = false;
             try {
-                // Try to get demo mode from session storage first
                 isDemoMode = sessionStorage.getItem('demo_mode') === 'true';
             } catch (e) {
                 console.log('Could not access demo mode from session storage, defaulting to production mode');
             }
-            
-            const timeoutDuration = isDemoMode ? 300000 : 45000; // 5 minutes for demo, 45 seconds for production
-            const timeoutMessage = isDemoMode ? 
-                "\n⚠️ Demo simulation timed out after 5 minutes. Please refresh and try again.\n" :
-                "\n⚠️ Production provisioning timed out after 45 seconds. Please check server logs for more details or try again.\n";
-            
-            provisionTimeout = setTimeout(() => {
-                if (isProvisioning) {
-                    logs.textContent += timeoutMessage;
-                    logs.scrollTop = logs.scrollHeight;
-                    displayFlashMessage(isDemoMode ? "Demo simulation timed out." : "Production provisioning timed out. Please check logs.", "error");
-
-                    isProvisioning = false;
-                    button.disabled = false;
-                    btnText.textContent = '🚀 Start Provisioning';
-                    spinner.style.display = 'none';
-                    if (eventSource) { // Close SSE if it's still open
-                        eventSource.close();
-                        eventSource = null;
+            if (isDemoMode) {
+                provisionTimeout = 120000; // 2 minutes for demo mode (ลดจาก 5 นาที)
+            } else {
+                // Production Mode: ไม่ต้องตั้ง timeout, รอจนเสร็จจริง
+                provisionTimeout = null;
                     }
-                }
-            }, timeoutDuration);
 
 
             // Collect form data for asynchronous submission
@@ -3050,6 +3286,9 @@ Example configuration:
                         eventSource = null;
                     }
                 }
+                if (data && data.vms) {
+                    lastProvisionedVMs = data.vms;
+                }
             })
             .catch(error => {
                 console.error('Error sending provisioning request via fetch:', error);
@@ -3110,7 +3349,8 @@ Example configuration:
             
             nodesContainer.appendChild(nodeDiv);
             updateNodeIPFields();
-            updateRequiredAttributes(); // Update required attributes for new node
+            updateRequiredAttributes();
+            updateNodeLabels(); // เพิ่มบรรทัดนี้
         }
 
         function removeNode(nodeId) {
@@ -3123,15 +3363,28 @@ Example configuration:
                 // but then you'd need to re-index all subsequent nodes.
                 // For now, just remove and update required attributes.
                 updateRequiredAttributes(); 
+                updateNodeLabels(); // เพิ่มบรรทัดนี้
             }
         }
 
         function updateNodeIPFields() {
-            for (let i = 1; i <= nodeCount; i++) {
+            // 1. เก็บค่าปัจจุบันของทุก input IP
+            const ipValues = {};
+            const nodeElements = document.querySelectorAll('.node-config');
+            nodeElements.forEach(nodeElement => {
+                const i = parseInt(nodeElement.id.split('_')[1]);
+                ipValues[i] = {};
+                for (let j = 1; j <= nicCount; j++) {
+                    const input = nodeElement.querySelector(`input[name="node_${i}_ip${j}"]`);
+                    ipValues[i][j] = input ? input.value : '';
+                }
+            });
+            // 2. รีเฟรช input field
+            nodeElements.forEach(nodeElement => {
+                const i = parseInt(nodeElement.id.split('_')[1]);
                 const container = document.getElementById(`node_${i}_ips`);
                 if (container) {
                     container.innerHTML = '';
-                    
                     for (let j = 1; j <= nicCount; j++) {
                         const ipRow = document.createElement('div');
                         ipRow.className = 'ip-row';
@@ -3141,12 +3394,13 @@ Example configuration:
                                    class="ip-input" 
                                    name="node_${i}_ip${j}" 
                                    placeholder="10.${j === 1 ? '10' : '20'}.10.${10 + i} (optional)"
-                                   pattern="^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$">
+                                   pattern="^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$"
+                                   value="${ipValues[i] && ipValues[i][j] ? ipValues[i][j] : ''}">
                         `;
                         container.appendChild(ipRow);
                     }
                 }
-            }
+            });
         }
 
         function clearLogs() {
@@ -3195,6 +3449,117 @@ Example configuration:
         window.detectNetworkZone = detectNetworkZone;
 
         console.log('provision.html script fully loaded and parsed.'); // Marker for debugging
+
+        function updateNodeLabels() {
+            const nodeElements = document.querySelectorAll('.node-config');
+            nodeElements.forEach((nodeElement, idx) => {
+                const nodeNumberSpan = nodeElement.querySelector('.node-number');
+                if (nodeNumberSpan) nodeNumberSpan.textContent = idx + 1;
+                const nodeTitle = nodeElement.querySelector('.node-title');
+                if (nodeTitle) nodeTitle.innerHTML = `<span class="node-number">${idx + 1}</span> Node ${idx + 1} Configuration`;
+            });
+        }
+
+        // เพิ่มฟังก์ชัน fetchProvisionedVMs() เพื่อดึงข้อมูล VM status จาก backend (Demo Mode)
+        async function fetchProvisionedVMs() {
+            try {
+                const response = await fetch('/api/last-provision-vms');
+                if (response.ok) {
+                    const data = await response.json();
+                    if (data && Array.isArray(data.vms)) {
+                        initializeStatusTable(data.vms.map(vm => ({
+                            name: vm.name,
+                            hostname: vm.hostname,
+                            ips: vm.ips,
+                            status: vm.status,
+                            progress: vm.progress
+                        })));
+                        return data.vms;
+                    }
+                }
+                return [];
+            } catch (e) {
+                console.error('Failed to fetch provisioned VMs:', e);
+                return [];
+            }
+        }
+
+        // เรียก fetchProvisionedVMs() หลัง provisioning เสร็จ (Demo Mode)
+        // ตัวอย่าง: fetchProvisionedVMs();
+
+        // เพิ่มฟังก์ชัน updateVMIPsCell
+        function updateVMIPsCell(vmName) {
+            const row = document.getElementById(`status-row-${vmName}`);
+            if (row && vmStatusData[vmName]) {
+                const ipsCell = row.querySelector('td:nth-child(3)');
+                if (ipsCell) {
+                    // Format IPs properly
+                    let ipsDisplay = '-';
+                    if (vmStatusData[vmName].ips) {
+                        if (typeof vmStatusData[vmName].ips === 'string') {
+                            ipsDisplay = vmStatusData[vmName].ips;
+                        } else if (typeof vmStatusData[vmName].ips === 'object') {
+                            // Convert object to string
+                            const ipValues = Object.values(vmStatusData[vmName].ips).filter(ip => ip);
+                            ipsDisplay = ipValues.length > 0 ? ipValues.join(', ') : 'DHCP';
+                        }
+                    }
+                    ipsCell.textContent = ipsDisplay;
+                }
+            }
+        }
+
+        // Update completion summary with VMs data
+        function updateCompletionSummary(vms) {
+            console.log('Updating completion summary with VMs:', vms);
+            
+            // Update status table
+            initializeStatusTable(vms.map(vm => ({
+                name: vm.name,
+                hostname: vm.hostname,
+                ips: vm.ips,
+                status: vm.status,
+                progress: vm.progress
+            })));
+            
+            // Calculate summary
+            const summary = {
+                total: vms.length,
+                success: vms.filter(vm => vm.status === 'success').length,
+                failed: vms.filter(vm => vm.status === 'failed').length,
+                pending: vms.filter(vm => vm.status === 'pending').length
+            };
+            
+            // Show completion menu
+            showCompletionMenu(summary);
+            
+            // Show success message
+            displayFlashMessage("Provisioning completed successfully!", "success");
+        }
+
+        // ===== DEBUGGING FUNCTIONS =====
+        function debugVMStatusTable() {
+            console.log('=== VM Status Table Debug ===');
+            console.log('vmStatusData:', vmStatusData);
+            console.log('Available VMs:', Object.keys(vmStatusData));
+            
+            for (const vmName in vmStatusData) {
+                const statusElement = document.getElementById(`status-${vmName}`);
+                const progressElement = document.getElementById(`progress-${vmName}`);
+                const progressTextElement = document.getElementById(`progress-text-${vmName}`);
+                
+                console.log(`VM ${vmName}:`, {
+                    statusElement: !!statusElement,
+                    progressElement: !!progressElement,
+                    progressTextElement: !!progressTextElement,
+                    currentStatus: vmStatusData[vmName].status,
+                    currentProgress: vmStatusData[vmName].progress
+                });
+            }
+            console.log('=== End Debug ===');
+        }
+        
+        // ===== VALIDATION FUNCTIONS =====
     </script>
 </body>
 </html>

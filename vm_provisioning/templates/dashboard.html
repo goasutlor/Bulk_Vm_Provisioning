@@ -467,10 +467,9 @@
             {% if messages %}
                 <div class="flash-messages">
                     {% for category, message in messages %}
-                        <div class="flash-message flash-{{ category }}">
-                            {% if category == 'success' %}✅{% elif category == 'error' %}❌{% else %}ℹ️{% endif %}
-                            {{ message }}
-                        </div>
+                        {% if message != 'You have been logged out successfully.' %}
+                            <div class="flash-message flash-{{ category }}">{{ message }}</div>
+                        {% endif %}
                     {% endfor %}
                 </div>
             {% endif %}
